@@ -26,20 +26,18 @@ jobs:
         with:
           node-version: "20"
           cache: 'npm'
-          cache-dependency-path: './laistly/package-lock.json'
+          cache-dependency-path: './package-lock.json'
 
       - name: Install dependencies
         run: npm ci
-        working-directory: ./laistly
 
       - name: Build
         run: npm run build
-        working-directory: ./laistly
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./laistly/dist
+          path: ./dist
 
   deploy:
     environment:
