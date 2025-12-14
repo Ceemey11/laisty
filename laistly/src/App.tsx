@@ -160,28 +160,34 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
   const [loading, setLoading] = useState(true);
   const [newTaskName, setNewTaskName] = useState("");
   const [priority, setPriority] = useState("normal"); // high, normal, low
-  const [dueDate, setDueDate] = useState(""); // Nueva fecha de vencimiento
+  const [dueDate, setDueDate] = useState("");
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState(null);
   const [expandedNotesId, setExpandedNotesId] = useState(null);
-  const [sortMode, setSortMode] = useState("priority"); // priority, date-new, date-old
+  const [sortMode, setSortMode] = useState("priority");
 
-  // Estados Compartir
+  // Confirmation States
+  const [userToRemove, setUserToRemove] = useState(null);
+  const [leaveListConfirmation, setLeaveListConfirmation] = useState(false);
+  const [resetConfirmation, setResetConfirmation] = useState(false);
+
+  // Edit State
+  const [editingTask, setEditingTask] = useState(null); // { id, name, priority, dueDate }
+
+  // Share States
   const [inviteEmail, setInviteEmail] = useState("");
   const [shareStatus, setShareStatus] = useState("");
   const [sharedUsers, setSharedUsers] = useState([]);
-  const [listOwner, setListOwner] = useState(""); // Nuevo: para saber quién es el dueño
+  const [listOwner, setListOwner] = useState("");
 
   useEffect(() => {
-    // 1. Subscribe to ITEMS (TASKS)
     const qItems = query(getItemCollectionRef(listId));
     const unsubscribeItems = onSnapshot(qItems, (snapshot) => {
       const itemsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      // Sort: Uncompleted first, then by Priority (High>Normal>Low), then by Name
       const priorityVal = { high: 3, normal: 2, low: 1 };
       itemsData.sort((a, b) => {
         if (a.completed === b.completed) {
-          if (a.completed) return 0; // Don't sort completed strictly
+          if (a.completed) return 0;
           const pA = priorityVal[a.priority] || 2;
           const pB = priorityVal[b.priority] || 2;
           return pB - pA;
@@ -192,7 +198,6 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
       setLoading(false);
     });
 
-    // 2. Subscribe to List Metadata (for shared users and owner)
     const unsubscribeList = onSnapshot(doc(getListCollectionRef(db), listId), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
@@ -204,11 +209,9 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
     return () => { unsubscribeItems(); unsubscribeList(); };
   }, [listId]);
 
-  // Sorted tasks based on sort mode
   const sortedTasks = useMemo(() => {
     const incompleteTasks = tasks.filter(t => !t.completed);
     const completedTasks = tasks.filter(t => t.completed);
-
     const priorityVal = { high: 3, normal: 2, low: 1 };
 
     let sorted = [...incompleteTasks];
@@ -239,16 +242,13 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
         notes: "",
         createdAt: serverTimestamp()
       };
-
-      // Agregar dueDate solo si se especificó
       if (dueDate) {
         taskData.dueDate = new Date(dueDate).getTime();
       }
-
       await addDoc(getItemCollectionRef(listId), taskData);
       setNewTaskName("");
       setPriority("normal");
-      setDueDate(""); // Resetear fecha
+      setDueDate("");
       updateListTimestamp(listId);
     } catch (e) { console.error("Error adding task:", e); }
   };
@@ -259,9 +259,7 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
         completed: !task.completed
       });
       updateListTimestamp(listId);
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   const handleDeleteTask = async (taskId) => {
@@ -278,7 +276,27 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
     } catch (e) { console.error(e); }
   };
 
-  const handleResetAllCompleted = async () => {
+  const handleEditTask = async (e) => {
+    e.preventDefault();
+    if (!editingTask || !editingTask.name.trim()) return;
+    try {
+      const updateData = {
+        name: editingTask.name.trim(),
+        priority: editingTask.priority,
+      };
+      if (editingTask.dueDate) {
+        updateData.dueDate = new Date(editingTask.dueDate).getTime();
+      } else {
+        updateData.dueDate = null; // Remove due date if cleared
+      }
+
+      await updateDoc(doc(getItemCollectionRef(listId), editingTask.id), updateData);
+      setEditingTask(null);
+      updateListTimestamp(listId);
+    } catch (e) { console.error(e); }
+  };
+
+  const confirmResetAllCompleted = async () => {
     const completedTasks = tasks.filter(t => t.completed);
     try {
       await Promise.all(
@@ -287,10 +305,10 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
         )
       );
       updateListTimestamp(listId);
+      setResetConfirmation(false);
     } catch (e) { console.error("Error resetting tasks:", e); }
   };
 
-  // --- SHARE FUNCTIONS (Reused logic) ---
   const handleInvite = async (e) => {
     e.preventDefault();
     if (!inviteEmail.trim()) return;
@@ -307,13 +325,14 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
     }
   };
 
-  // Nuevo: Función para quitar acceso a un usuario (solo owner)
-  const handleRemoveUser = async (emailToRemove) => {
+  const confirmRemoveUser = async () => {
+    if (!userToRemove) return;
     try {
       await updateDoc(doc(getListCollectionRef(db), listId), {
-        sharedWith: arrayRemove(emailToRemove)
+        sharedWith: arrayRemove(userToRemove)
       });
       setShareStatus("removed");
+      setUserToRemove(null);
       setTimeout(() => setShareStatus(""), 3000);
     } catch (e) {
       console.error(e);
@@ -321,14 +340,14 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
     }
   };
 
-  // Nuevo: Función para salir de una lista compartida
-  const handleLeaveList = async () => {
+  const confirmLeaveList = async () => {
     const userIdentifier = currentUser.email && currentUser.email.includes('@') ? currentUser.email : currentUser.uid;
     try {
       await updateDoc(doc(getListCollectionRef(db), listId), {
         sharedWith: arrayRemove(userIdentifier)
       });
-      onBack(); // Volver al dashboard
+      setLeaveListConfirmation(false);
+      onBack();
     } catch (e) {
       console.error(e);
     }
@@ -343,7 +362,6 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
     });
   };
 
-  // Determinar si el usuario actual es el dueño
   const userIdentifier = currentUser.email && currentUser.email.includes('@') ? currentUser.email : currentUser.uid;
   const isOwner = listOwner === userIdentifier;
 
@@ -369,7 +387,7 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
         <div className="flex items-center gap-2">
           {!isOwner && (
             <button
-              onClick={handleLeaveList}
+              onClick={() => setLeaveListConfirmation(true)}
               className="px-3 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition text-sm font-medium flex items-center gap-1"
               title="Leave this list"
             >
@@ -419,7 +437,7 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
                       <span className="text-xs text-blue-700 font-medium">{email}</span>
                       {isOwner && (
                         <button
-                          onClick={() => handleRemoveUser(email)}
+                          onClick={() => setUserToRemove(email)}
                           className="text-red-500 hover:text-red-700 transition"
                           title="Remove access"
                         >
@@ -431,6 +449,99 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRMATION MODALS */}
+      {/* 1. Remove User Confirmation (Over Share Modal or separate) */}
+      {userToRemove && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold mb-2">Remove User?</h3>
+            <p className="text-sm text-gray-600 mb-4">Are you sure you want to remove access for <b>{userToRemove}</b>?</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setUserToRemove(null)} className="text-gray-600">Cancel</button>
+              <button onClick={confirmRemoveUser} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold">Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. Leave List Confirmation */}
+      {leaveListConfirmation && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold mb-2">Leave List?</h3>
+            <p className="text-sm text-gray-600 mb-4">Are you sure you want to leave this list? You will lose access.</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setLeaveListConfirmation(false)} className="text-gray-600">Cancel</button>
+              <button onClick={confirmLeaveList} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold">Leave</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Reset Completed Confirmation */}
+      {resetConfirmation && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <div className="flex items-center gap-2 mb-2"><RefreshCcw className="text-blue-600" /> <h3 className="font-bold">Reset Tasks?</h3></div>
+            <p className="text-sm text-gray-600 mb-4">This will mark all completed tasks as pending again.</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setResetConfirmation(false)} className="text-gray-600">Cancel</button>
+              <button onClick={confirmResetAllCompleted} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">Reset All</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Edit Task Modal */}
+      {editingTask && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl relative">
+            <button onClick={() => setEditingTask(null)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">✕</button>
+            <div className="flex items-center gap-2 mb-4 text-gray-800">
+              <Edit className="w-5 h-5" /> <h3 className="font-bold text-lg">Edit Task</h3>
+            </div>
+            <form onSubmit={handleEditTask} className="flex flex-col gap-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Task Name</label>
+                <input
+                  type="text"
+                  value={editingTask.name}
+                  onChange={e => setEditingTask({ ...editingTask, name: e.target.value })}
+                  className="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                  autoFocus
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Priority</label>
+                  <select
+                    value={editingTask.priority}
+                    onChange={e => setEditingTask({ ...editingTask, priority: e.target.value })}
+                    className="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                  >
+                    <option value="low">Low</option>
+                    <option value="normal">Normal</option>
+                    <option value="high">High</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Due Date</label>
+                  <input
+                    type="date"
+                    value={editingTask.dueDate ? new Date(editingTask.dueDate).toISOString().split('T')[0] : ""}
+                    onChange={e => setEditingTask({ ...editingTask, dueDate: e.target.value ? new Date(e.target.value).getTime() : null })}
+                    className="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                  />
+                </div>
+              </div>
+
+              <button type="submit" disabled={!editingTask.name.trim()} className="bg-blue-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-blue-700 transition disabled:opacity-50 mt-2">Save Changes</button>
+            </form>
           </div>
         </div>
       )}
@@ -585,7 +696,9 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
                   >
                     <AlignLeft className="w-4 h-4" />
                   </button>
-                  <button onClick={() => setDeleteConfirmation(task)} className="p-2 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition"><Trash2 className="w-4 h-4" /></button>
+                  {/* EDIT BUTTON (NEW) */}
+                  <button onClick={() => setEditingTask(task)} className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 transition"><Edit className="w-4 h-4" /></button>
+                  <button onClick={() => setDeleteConfirmation(task)} className="p-2 text-gray-300 hover:text-red-500 group-hover:opacity-100 transition"><Trash2 className="w-4 h-4" /></button>
                 </div>
               </div>
               {/* NOTES AREA */}
@@ -615,7 +728,7 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-bold text-gray-500 uppercase flex items-center gap-2 tracking-wider"><Check className="w-4 h-4" /> Completed</h3>
             <button
-              onClick={handleResetAllCompleted}
+              onClick={() => setResetConfirmation(true)}
               className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-xs font-bold transition flex items-center gap-1"
               title="Reset all completed tasks"
             >
@@ -631,6 +744,7 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
                   </button>
                   <p className="font-medium text-gray-500 line-through decoration-gray-400">{task.name}</p>
                 </div>
+                {/* No Edit in completed? Or yes? Usually no need to edit completed, but delete yes. */}
                 <button onClick={() => setDeleteConfirmation(task)} className="p-2 text-gray-300 hover:text-red-500 transition"><Trash2 className="w-4 h-4" /></button>
               </div>
             ))}
@@ -640,7 +754,7 @@ function TodoListView({ listId, listName, onBack, currentUser }) {
 
       {/* DELETE CONFIRMATION */}
       {deleteConfirmation && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
             <h3 className="font-bold mb-2">Delete Task?</h3>
             <p className="text-sm text-gray-600 mb-4">"{deleteConfirmation.name}" will be permanently removed.</p>
@@ -698,6 +812,14 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
   const [generatedIdeas, setGeneratedIdeas] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // Confirmation States (NEW)
+  const [userToRemove, setUserToRemove] = useState(null);
+  const [leaveListConfirmation, setLeaveListConfirmation] = useState(false);
+  const [itemDeleteConfirmation, setItemDeleteConfirmation] = useState(null);
+
+  // Edit State (NEW)
+  const [editingItem, setEditingItem] = useState(null);
+
   // Load items and shops
   useEffect(() => {
     const q = query(getItemCollectionRef(listId));
@@ -732,13 +854,15 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
     return () => { unsubscribe(); unsubList(); };
   }, [listId]);
 
-  // Nuevo: Función para quitar acceso a un usuario (solo owner)
-  const handleRemoveUser = async (emailToRemove) => {
+  // Handle Remove User (Confirmation wrapper)
+  const confirmRemoveUser = async () => {
+    if (!userToRemove) return;
     try {
       await updateDoc(doc(getListCollectionRef(db), listId), {
-        sharedWith: arrayRemove(emailToRemove)
+        sharedWith: arrayRemove(userToRemove)
       });
       setShareStatus("removed");
+      setUserToRemove(null);
       setTimeout(() => setShareStatus(""), 3000);
     } catch (e) {
       console.error(e);
@@ -746,14 +870,14 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
     }
   };
 
-  // Nuevo: Función para salir de una lista compartida
-  const handleLeaveList = async () => {
+  // Handle Leave List
+  const confirmLeaveList = async () => {
     const userIdentifier = currentUser.email && currentUser.email.includes('@') ? currentUser.email : currentUser.uid;
     try {
       await updateDoc(doc(getListCollectionRef(db), listId), {
         sharedWith: arrayRemove(userIdentifier)
       });
-      onBack(); // Volver al dashboard
+      onBack();
     } catch (e) {
       console.error(e);
     }
@@ -849,13 +973,38 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
     const newQty = currentQty + change;
 
     if (newQty < 1) {
-      await deleteDoc(doc(getItemCollectionRef(listId), itemId));
-    } else {
-      await updateDoc(doc(getItemCollectionRef(listId), itemId), {
-        quantity: newQty
-      });
+      const item = items.find(i => i.id === itemId);
+      setItemDeleteConfirmation(item || { id: itemId, name: 'Item' });
+      return;
     }
-    await updateListTimestamp(listId); // Actualizar timestamp
+
+    await updateDoc(doc(getItemCollectionRef(listId), itemId), {
+      quantity: newQty
+    });
+    await updateListTimestamp(listId);
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!itemDeleteConfirmation) return;
+    try {
+      await deleteDoc(doc(getItemCollectionRef(listId), itemDeleteConfirmation.id));
+      await updateListTimestamp(listId);
+      setItemDeleteConfirmation(null);
+    } catch (e) { console.error(e); }
+  };
+
+  const handleEditItem = async (e) => {
+    e.preventDefault();
+    if (!editingItem || !editingItem.name.trim()) return;
+    try {
+      await updateDoc(doc(getItemCollectionRef(listId), editingItem.id), {
+        name: editingItem.name.trim(),
+        quantity: parseInt(editingItem.quantity) || 1,
+        supermarket: editingItem.supermarket
+      });
+      await updateListTimestamp(listId);
+      setEditingItem(null);
+    } catch (e) { console.error(e); }
   };
 
   const handleDeleteItem = async (id) => {
@@ -1158,7 +1307,7 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
         <div className="flex items-center gap-2">
           {!isOwner && (
             <button
-              onClick={handleLeaveList}
+              onClick={() => setLeaveListConfirmation(true)}
               className="px-3 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition text-sm font-medium flex items-center gap-1"
               title="Leave this list"
             >
@@ -1210,7 +1359,7 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
                       <span className="text-xs text-blue-700 font-medium">{email}</span>
                       {isOwner && (
                         <button
-                          onClick={() => handleRemoveUser(email)}
+                          onClick={() => setUserToRemove(email)}
                           className="text-red-500 hover:text-red-700 transition"
                           title="Remove access"
                         >
@@ -1273,6 +1422,97 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
                 autoFocus
               />
               <button type="submit" disabled={!renameShop.newName.trim()} className="bg-green-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-green-700 transition disabled:opacity-50">Rename</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* USER REMOVE CONFIRMATION */}
+      {userToRemove && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold mb-2">Remove User?</h3>
+            <p className="text-sm text-gray-600 mb-4">Are you sure you want to remove access for <b>{userToRemove}</b>?</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setUserToRemove(null)} className="text-gray-600">Cancel</button>
+              <button onClick={confirmRemoveUser} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold">Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LEAVE LIST CONFIRMATION */}
+      {leaveListConfirmation && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold mb-2">Leave List?</h3>
+            <p className="text-sm text-gray-600 mb-4">Are you sure you want to leave this list? You will lose access.</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setLeaveListConfirmation(false)} className="text-gray-600">Cancel</button>
+              <button onClick={confirmLeaveList} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold">Leave</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ITEM DELETE CONFIRMATION */}
+      {itemDeleteConfirmation && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold mb-2">Delete Item?</h3>
+            <p className="text-sm text-gray-600 mb-4">"{itemDeleteConfirmation.name}" will be removed from the list.</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setItemDeleteConfirmation(null)} className="text-gray-600">Cancel</button>
+              <button onClick={confirmDeleteItem} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT ITEM MODAL */}
+      {editingItem && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl relative">
+            <button onClick={() => setEditingItem(null)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">✕</button>
+            <div className="flex items-center gap-2 mb-4 text-gray-800">
+              <Edit className="w-5 h-5" /> <h3 className="font-bold text-lg">Edit Item</h3>
+            </div>
+            <form onSubmit={handleEditItem} className="flex flex-col gap-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Item Name</label>
+                <input
+                  type="text"
+                  value={editingItem.name}
+                  onChange={e => setEditingItem({ ...editingItem, name: e.target.value })}
+                  className="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none"
+                  autoFocus
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Quantity</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={editingItem.quantity}
+                    onChange={e => setEditingItem({ ...editingItem, quantity: e.target.value })}
+                    className="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1 ml-1">Shop</label>
+                  <select
+                    value={editingItem.supermarket}
+                    onChange={e => setEditingItem({ ...editingItem, supermarket: e.target.value })}
+                    className="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none bg-white"
+                  >
+                    {shops.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <button type="submit" disabled={!editingItem.name.trim()} className="bg-green-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-green-700 transition disabled:opacity-50 mt-2">Save Changes</button>
             </form>
           </div>
         </div>
@@ -1536,11 +1776,14 @@ function ShoppingListView({ listId, listName, onBack, currentUser }) {
                 </div>
                 <div className="p-2 space-y-2">
                   {catItems.map((item) => (
-                    <div key={item.id} className="flex justify-between items-center bg-white border border-gray-100 p-2 rounded-lg shadow-sm hover:shadow-md transition">
-                      <div className="min-w-0 flex-1 pr-2">
-                        <span className="font-bold text-gray-900 block truncate leading-tight" title={item.name} data-completed={item.completed}>
-                          {item.name}
-                        </span>
+                    <div key={item.id} className="flex justify-between items-center bg-white border border-gray-100 p-2 rounded-lg shadow-sm hover:shadow-md transition group/item">
+                      <div className="min-w-0 flex-1 pr-2 cursor-pointer" onClick={() => setEditingItem(item)}>
+                        <div className="flex items-center gap-1">
+                          <span className="font-bold text-gray-900 block truncate leading-tight hover:text-green-600 transition" title={item.name} data-completed={item.completed}>
+                            {item.name}
+                          </span>
+                          <Edit className="w-3 h-3 text-gray-300 opacity-0 group-hover/item:opacity-100 transition" />
+                        </div>
                         <span className="text-xs text-gray-400">{item.addedBy ? `by ${item.addedBy}` : ''}</span>
                       </div>
 
@@ -2120,11 +2363,13 @@ export default function App() {
   const [showForgotPassword, setShowForgotPassword] = useState(false); // Nuevo
   const [resetEmail, setResetEmail] = useState(""); // Nuevo
   const [resetStatus, setResetStatus] = useState(""); // Nuevo
+  const [logoutConfirmation, setLogoutConfirmation] = useState(false); // Nuevo
 
   // FIX: Mover handleLogout al cuerpo principal para que sea accesible en el JSX de App
-  const handleLogout = async () => {
+  const confirmLogout = async () => {
     await signOut(auth);
     setUser(null); setView('home'); setCurrentList(null);
+    setLogoutConfirmation(false);
   };
 
   const handleForgotPassword = async (e) => {
@@ -2299,7 +2544,7 @@ export default function App() {
       <header className="bg-white shadow-sm sticky top-0 z-20 w-full">
         <div className="max-w-7xl mx-auto px-4 py-3 flex justify-between items-center w-full">
           <div className="flex items-center gap-2 text-green-700 cursor-pointer" onClick={() => { setView('home'); setCurrentList(null); }}>
-            <ShoppingCart className="w-6 h-6" /><h1 className="text-lg font-bold hidden sm:block">Super List</h1>
+            <ShoppingCart className="w-6 h-6" /><h1 className="text-lg font-bold hidden sm:block">Laistly</h1>
           </div>
           <div className="flex items-center gap-3">
             <button onClick={() => setView('profile')} className="flex items-center gap-2 bg-gray-100 rounded-full pl-1 pr-3 py-1 hover:bg-gray-200 transition">
@@ -2310,10 +2555,24 @@ export default function App() {
               )}
               <span className="text-xs font-medium text-gray-700 max-w-[100px] truncate">{user.displayName || user.email?.split('@')[0]}</span>
             </button>
-            <button onClick={handleLogout} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full transition"><LogOut className="w-5 h-5" /></button>
+            <button onClick={() => setLogoutConfirmation(true)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full transition"><LogOut className="w-5 h-5" /></button>
           </div>
         </div>
       </header>
+
+      {/* Logout Confirmation Modal */}
+      {logoutConfirmation && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-4"><LogOut className="text-red-600" /> <h3 className="font-bold">Log Out?</h3></div>
+            <p className="text-sm text-gray-600 mb-4">Are you sure you want to sign out?</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setLogoutConfirmation(false)} className="px-4 py-2 text-gray-600">Cancel</button>
+              <button onClick={confirmLogout} className="px-4 py-2 bg-red-600 text-white rounded-lg font-bold">Log Out</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 py-6 w-full">
         {view === 'profile' ? (
